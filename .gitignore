@@ -1,0 +1,46 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+.build/
+# VSCode workspace and config
+.vscode/
+
+# macOS and system files
+.DS_Store
+Thumbs.db
+setup.py
+# Streamlit configuration and secrets
+.streamlit/secrets.toml
+
+# Ignore test artifacts
+*.log
+*.tmp
+*.bak
+
+# Report ID and text files
+Report_id.txt
+
+# Ignore data folder
+/data/
+/build/
+# Ignore compiled files
+*.so
+
+# Ignore Jupyter Notebook checkpoints (if ever added)
+.ipynb_checkpoints/
+
+# Ignore coverage/test results (optional)
+htmlcov/
+.tox/
+.coverage
+.cache
+nosetests.xml
+test.py
