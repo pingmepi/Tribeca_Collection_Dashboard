@@ -406,17 +406,58 @@ def render_dashboard(df,today):
             st.bar_chart(bucket_counts_registered.set_index('TAT Bucket'))
 
         with col7:
+
             st.markdown("**Overdue Ageing**")
+
+            # Step 1: Calculate overdue days
             filtered['overdue_days'] = (today - (filtered[demand_gen_col] + pd.to_timedelta(15, unit='D'))).dt.days
-            filtered['overdue_bucket'] = filtered['overdue_days'].apply(bucket)
 
-            bucket_summary = filtered.groupby('overdue_bucket')['Amount Overdue'].sum().reindex(bucket_order).fillna(0).reset_index()
-            bucket_summary['Amount Overdue'] = bucket_summary['Amount Overdue'] /1e7
-            bucket_summary.columns = ['Overdue Bucket', 'Total Overdue Amount']
+            # Step 2: Filter rows where 'Amount Overdue' > 1000
+            overdue_filtered = filtered[filtered['Amount Overdue'] > 1000].copy()
+
+            # Step 3: Bucket the filtered data
+            overdue_filtered['overdue_bucket'] = overdue_filtered['overdue_days'].apply(bucket)
+
+            # Step 4: Group by bucket → sum & count unique customers
+            bucket_summary = (
+                overdue_filtered.groupby('overdue_bucket')
+                .agg({
+                    'Amount Overdue': 'sum',
+                     application_booking_id: pd.Series.nunique  # replace with actual customer identifier if different
+                })
+                .reindex(bucket_order)
+                .fillna(0)
+                .reset_index()
+            )
+
+            # Step 5: Scale amount for readability
+            bucket_summary['Amount Overdue'] = bucket_summary['Amount Overdue'] / 1e7
+            bucket_summary.columns = ['Overdue Bucket', 'Overdue Amt (Cr)', 'User Count']
+
+            # Step 6: Display
             st.dataframe(bucket_summary, use_container_width=True)
-            st.bar_chart(bucket_summary.set_index('Overdue Bucket'))
+            st.bar_chart(bucket_summary.set_index('Overdue Bucket')[['User Count']])
 
 
+        st.markdown("**Overdue Customers List**")
+
+        # Step 1: Filter again if not reused
+        overdue_customers = filtered[filtered['Amount Overdue'] > 1000].copy()
+
+        # Step 2: Select relevant columns
+        customer_table = (
+            overdue_customers.groupby([customer_name, property_name])['Amount Overdue']
+            .sum()
+            .reset_index()
+            .sort_values(by='Amount Overdue', ascending=False)
+        )
+
+        # Step 3: Format amount (optional, convert to lakhs or cr)
+        customer_table['Amount Overdue (Lakhs)'] = customer_table['Amount Overdue'] / 1e5
+        customer_table = customer_table.drop(columns=['Amount Overdue'])
+
+        # Step 4: Show table
+        st.dataframe(customer_table, use_container_width=True)
 
 
     #--------------------------------------------------------------------------------------------------------------------------------------------------------------
