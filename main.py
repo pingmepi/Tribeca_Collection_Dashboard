@@ -14,6 +14,9 @@ from utils.helper import get_column
 # Page configuration
 st.set_page_config(page_title="Tribeca Collection Dashboard", layout="wide", page_icon='assets/logo.webp')
 
+# Initialize session state
+if 'data' not in st.session_state:
+    st.session_state.data = None
 
 # ------------------ Shared "Today" Input ------------------
 st.sidebar.markdown("### 📅 Date Configuration")
@@ -21,10 +24,11 @@ today = pd.to_datetime(st.sidebar.date_input(
     "Calculate as of date",
     value=pd.to_datetime("today"),
     key="global_today"
-))
+)).normalize()
 
-
-
+# Add freshness indicator
+if st.session_state.data is not None:
+    st.sidebar.success(f"📊 Data loaded at {pd.Timestamp.now().strftime('%H:%M')}")
 
 
 # Setup

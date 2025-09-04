@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from utils.helper import get_column
 
-def check(df,today):
+def check(df, today):
     df.columns = df.columns.str.strip() # -> Quality check for columns name.
     ## List of columns 
     # today = pd.to_datetime(st.sidebar.date_input("📅 Calculate Due As of Date", value=pd.to_datetime("today")))
@@ -12,25 +12,25 @@ def check(df,today):
 
     ## column entry 
     # Get dynamic mappings with fallback if default is missing
-    other_charges=get_column(df,"Other Charges (Corpus+Maintenance)","Other Charges (Corpus+Maintenance)")
-    booking_col = get_column(df, "Booking Date", "Booking Date")
-    reg_date_col = get_column(df, "Agreement Registration Date", "Agreement Registration Date")
-    actual_payment_col = get_column(df, "Actual Payment Date", "Actual Payment Date")
-    amount_due_col = get_column(df, "Total Amount Due", "Total Amount Due")
-    payment_received_col = get_column(df, "Payment Received", "Payment Received")
-    total_agreement_col = get_column(df, "Total Agreement Value", "Total Agreement Value")
-    budgeted_date_col = get_column(df, "Budgeted Date", "Budgeted Date")
-    percentage_col=get_column(df, "Amount Percent", "Amount Percent")
-    demand_gen_col = get_column(df, "Demand generation date", "Demand Generation Date")
-    milestone_status_col = get_column(df, "Is Milestone Completed", "Milestone Completion Status")
-    property_name = get_column(df, "Property Name", "Unit/Property Name (Application / Booking ID)")
-    customer_name = get_column(df, "Customer Name", "Customer Name")
-    active= get_column(df, "Active", "Active")
-    application_booking_id = get_column(df, "Application / Booking ID", "Application / Booking ID (Unique and Not Null)")
-    tax = get_column(df, "Total Service Tax On PPD", "Application / Booking ID (Unique and Not Null)")
-    tower = get_column(df, "Tower", "Tower")
-    type = get_column(df, "Type", "Type")
-    milestone_name = get_column(df, "Milestone Name", "Milestone Name")
+    other_charges = get_column(df, "Other Charges (Corpus+Maintenance)", label="Other Charges (Corpus+Maintenance)")
+    booking_col = get_column(df, "Booking Date", label="Booking Date")
+    reg_date_col = get_column(df, "Agreement Registration Date", "Registration Date", label="Registration Date")
+    actual_payment_col = get_column(df, "Actual Payment Date", "Payment Received Date", "Receipt Date", label="Payment Date")
+    amount_due_col = get_column(df, "Total Amount Due", "Amount Due", "Due Amount", label="Amount Due")
+    payment_received_col = get_column(df, "Payment Received", "Amount Received", label="Payment Received")
+    total_agreement_col = get_column(df, "Total Agreement Value", "Agreement Value", "Agreement Amount", label="Agreement Value")
+    budgeted_date_col = get_column(df, "Budgeted Date", "Planned Demand Date", label="Budgeted Date")
+    percentage_col = get_column(df, "Amount Percent", label="Amount Percent")
+    demand_gen_col = get_column(df, "Demand Generation Date", "Demand generation date", "Demand Raised Date", "Invoice Date", label="Demand Generation Date")
+    milestone_status_col = get_column(df, "Is Milestone Completed", "Milestone Completion Status", "Milestone Completed", label="Milestone Status")
+    property_name = get_column(df, "Unit/Property Name (Application / Booking ID)", "Property Name", "Unit / Property Name", label="Property Name")
+    customer_name = get_column(df, "Customer Name", "Account Name", label="Customer Name")
+    active = get_column(df, "Active", "Is Active", "Status", label="Active Status")
+    application_booking_id = get_column(df, "Application / Booking ID", "Booking ID", "Agreement/Booking ID", "Opportunity/Booking ID", label="Booking ID")
+    tax_col = get_column(df, "Total Service Tax On PPD", "Tax Amount", "GST Amount", "Total Tax", label="Tax Amount")
+    tower = get_column(df, "Tower", label="Tower")
+    type_col = get_column(df, "Type", label="Type")
+    milestone_name = get_column(df, "Milestone Name", label="Milestone Name")
 
 
     df[booking_col] = pd.to_datetime(df[booking_col], errors='coerce', dayfirst=True)
@@ -42,7 +42,7 @@ def check(df,today):
     df[demand_gen_col] = pd.to_datetime(df[demand_gen_col], errors='coerce', dayfirst=True)
     df[budgeted_date_col] = pd.to_datetime(df[budgeted_date_col], errors='coerce', dayfirst=True)
     df[property_name] = df[property_name].astype(str).str.strip()
-    df[tax]= pd.to_numeric(df[tax].astype(str).str.replace(r'[₹,]', '', regex=True), errors='coerce')
+    df[tax_col] = pd.to_numeric(df[tax_col].astype(str).str.replace(r'[₹,]', '', regex=True), errors='coerce')
 
 
 
@@ -113,9 +113,9 @@ def check(df,today):
     # Check 15: Booking Financial Mismatch - Agreement + Other Charges vs Total Due
     grouped = df.groupby(application_booking_id).agg({
         property_name: 'first',
-        total_agreement_col: 'first',         # Take the single value
-        other_charges: 'first',               # Take the single value
-        amount_due_col: 'sum'                 # Sum for booking
+        total_agreement_col: 'first',  # Take the single value
+        other_charges: 'first',        # Take the single value
+        amount_due_col: 'sum'          # Sum for booking
     }).reset_index()
 
     grouped['diff'] = (grouped[total_agreement_col] + grouped[other_charges]) - grouped[amount_due_col]
@@ -171,8 +171,8 @@ def check(df,today):
 
 
     # Check 14: Tax Greater Than Payment Received
-    invalid_tax = df[(df[tax] > df[payment_received_col])]
-    invalid_tax_df = invalid_tax[[property_name,customer_name, tax, payment_received_col]].drop_duplicates()
+    invalid_tax = df[(df[tax_col] > df[payment_received_col])]
+    invalid_tax_df = invalid_tax[[property_name, customer_name, tax_col, payment_received_col]].drop_duplicates()
     if not invalid_tax_df.empty:
         st.subheader("⚠️ GST/TAX Greater Than Payment Received")
         st.warning(f"{len(invalid_tax_df)} entries found where tax exceeds payment!")
