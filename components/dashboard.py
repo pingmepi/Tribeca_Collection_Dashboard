@@ -1,111 +1,113 @@
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-
-# We keep using the helper functions but add a safe local resolver
-try:
-    from utils.helper import get_column, bucket, percent, highlight_rows
-except Exception:
-    # Minimal fallbacks so module can be imported for static checks (won't affect real app where utils exists)
-    def get_column(df, primary, fallback=None):
-        return primary if primary in df.columns else (fallback if fallback in df.columns else primary)
-    def bucket(x):
-        if x is None or pd.isna(x):
-            return None
-        try:
-            x = int(x)
-        except Exception:
-            return None
-        if x < 31: return "< 30 Days"
-        if x < 61: return "31 - 60 Days"
-        if x < 91: return "61 - 90 Days"
-        return "> 90 Days"
-    def percent(num, den):
-        if not den or pd.isna(den) or den == 0:
-            return "0.00%"
-        return f"{(float(num) / float(den)) * 100:.2f}%"
-    def highlight_rows(_row):  # no-op style fallback
-        return [''] * len(_row)
+from utils.types import ColumnMapping
+from utils.helper import get_column, highlight_rows, bucket, percent
+from services.compute import compute_kpis as compute_kpis_service, compute_monthly_trend
+from components.kpi_strip import render_kpi_strip
+from components.monthly_trend import render_monthly_trend
 
 # ---------- Utilities ----------
-
-def resolve_column(df: pd.DataFrame, *candidates: str) -> str:
-    """Return the first column name that exists in df from the given candidates."""
-    for c in candidates:
-        if c and c in df.columns:
-            return c
-    # As a last resort, return the first candidate (will raise later if missing at use site)
-    return candidates[0]
 
 def fmt_inr(amount):
     if amount is None or (isinstance(amount, float) and pd.isna(amount)):
         amount = 0.0
     return f"₹{float(amount):,.2f}"
 
+
 def to_cr(amount):
     if amount is None or (isinstance(amount, float) and pd.isna(amount)):
         return 0.0
     return float(amount) / 1e7
 
+
 def _to_datetime(series):
     return pd.to_datetime(series, errors='coerce', dayfirst=True)
+
 
 def _to_numeric_inr(series):
     # Remove ₹ and commas and coerce to numeric
     return pd.to_numeric(series.astype(str).str.replace(r'[₹,]', '', regex=True), errors='coerce')
 
+
+
 # ---------- Core Renderer ----------
 
 def render_dashboard(df: pd.DataFrame, today):
-    """Render the CXO dashboard. Expects one row per milestone/line item."""
-    # Normalize 'today' to a date boundary to avoid partial day drift
+    """Main dashboard renderer with KPI strip and enhanced visuals"""
     today = pd.to_datetime(today).normalize()
 
-    # Early preview (raw) for debugging
-    st.dataframe(df, use_container_width=True)
-
-    # Clean column names
+    # Clean data
     df = df.copy()
     df.columns = df.columns.str.strip()
 
-    # Resolve columns with multiple fallback options where relevant
-    other_charges = resolve_column(df, "Other Charges (Corpus+Maintenance)", "Corpus+Maintenance", "Corpus Maintenance", "Other Charges")
-    booking_col = resolve_column(df, "Booking Date")
-    reg_date_col = resolve_column(df, "Agreement Registration Date", "Registration Date")
-    actual_payment_col = resolve_column(df, "Actual Payment Date", "Payment Received Date", "Receipt Date")
-    amount_due_col = resolve_column(df, "Total Amount Due", "Amount Due", "Due Amount")
-    payment_received_col = resolve_column(df, "Payment Received", "Amount Received")
-    total_agreement_col = resolve_column(df, "Total Agreement Value", "Agreement Value", "Agreement Amount")
-    budgeted_date_col = resolve_column(df, "Budgeted Date", "Planned Demand Date")
-    demand_gen_col = resolve_column(df, "Demand Generation Date", "Demand generation date", "Demand Raised Date", "Invoice Date")
-    milestone_status_col = resolve_column(df, "Is Milestone Completed", "Milestone Completion Status", "Milestone Completed")
-    property_name = resolve_column(df, "Unit/Property Name (Application / Booking ID)", "Property Name", "Unit / Property Name")
-    customer_name = resolve_column(df, "Customer Name", "Account Name", "Ledger Name")
-    active_col = resolve_column(df, "Active", "Is Active", "Status")
-    application_booking_id = resolve_column(df, "Application / Booking ID", "Booking ID", "Agreement/Booking ID", "Opportunity/Booking ID")
-    tax_col = resolve_column(df, "Total Service Tax On PPD", "Tax Amount", "GST Amount", "Total Tax")
-    tower_col = resolve_column(df, "Tower", "Block", "Building")
-    type_col = resolve_column(df, "Type", "Unit Type")
-    milestone_name_col = resolve_column(df, "Milestone Name", "Milestone", "Stage Name")
+    # Create column mapping
+    column_map = ColumnMapping(
+        booking_col=get_column(df, "Booking Date", label="Booking Date"),
+        reg_date_col=get_column(df, "Agreement Registration Date", "Registration Date", label="Registration Date"),
+        actual_payment_col=get_column(df, "Actual Payment Date", "Payment Received Date", "Receipt Date", label="Payment Date"),
+        amount_due_col=get_column(df, "Total Amount Due", "Amount Due", "Due Amount", label="Amount Due"),
+        payment_received_col=get_column(df, "Payment Received", "Amount Received", label="Payment Received"),
+        total_agreement_col=get_column(df, "Total Agreement Value", "Agreement Value", "Agreement Amount", label="Agreement Value"),
+        budgeted_date_col=get_column(df, "Budgeted Date", "Planned Demand Date", label="Budgeted Date"),
+        demand_gen_col=get_column(df, "Demand Generation Date", "Demand generation date", "Demand Raised Date", "Invoice Date", label="Demand Generation Date"),
+        milestone_status_col=get_column(df, "Is Milestone Completed", "Milestone Completion Status", "Milestone Completed", label="Milestone Status"),
+        property_name=get_column(df, "Unit/Property Name (Application / Booking ID)", "Property Name", "Unit / Property Name", label="Property Name"),
+        customer_name=get_column(df, "Customer Name", "Account Name", "Ledger Name", label="Customer Name"),
+        active_col=get_column(df, "Active", "Is Active", "Status", label="Active Status"),
+        application_booking_id=get_column(df, "Application / Booking ID", "Booking ID", "Agreement/Booking ID", "Opportunity/Booking ID", label="Booking ID"),
+        tax_col=get_column(df, "Total Service Tax On PPD", "Tax Amount", "GST Amount", "Total Tax", label="Tax Amount"),
+        tower_col=get_column(df, "Tower", label="Tower"),
+        type_col=get_column(df, "Type", label="Type"),
+        milestone_name=get_column(df, "Milestone Name", label="Milestone Name"),
+        other_charges=get_column(df, "Other Charges (Corpus+Maintenance)", "Corpus+Maintenance", "Corpus Maintenance", "Other Charges", label="Other Charges")
+    )
 
-    # Type normalization
-    for c in [booking_col, reg_date_col, actual_payment_col, demand_gen_col, budgeted_date_col]:
-        df[c] = _to_datetime(df[c])
+    # Ensure baseline types for new services and legacy logic
+    # Convert date-like columns if present
+    for c in [
+        "Booking Date", "Agreement Registration Date", "Registration Date",
+        "Actual Payment Date", "Payment Received Date", "Receipt Date",
+        "Demand Generation Date", "Demand generation date", "Demand Raised Date", "Invoice Date",
+        "Budgeted Date", "Planned Demand Date"
+    ]:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors='coerce', dayfirst=True)
 
-    for c in [total_agreement_col, amount_due_col, payment_received_col, tax_col, other_charges]:
-        df[c] = _to_numeric_inr(df[c])
+    # Convert currency/amount-like columns if present
+    for c in [
+        "Total Agreement Value", "Agreement Value", "Agreement Amount",
+        "Total Amount Due", "Amount Due", "Due Amount",
+        "Payment Received", "Amount Received",
+        "Total Service Tax On PPD", "Tax Amount", "GST Amount", "Total Tax",
+        "Other Charges (Corpus+Maintenance)", "Corpus+Maintenance", "Corpus Maintenance", "Other Charges"
+    ]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[₹,]', '', regex=True), errors='coerce')
+    # Bind column names to local variables for legacy logic below
+    booking_col = column_map.booking_col
+    reg_date_col = column_map.reg_date_col
+    actual_payment_col = column_map.actual_payment_col
+    amount_due_col = column_map.amount_due_col
+    payment_received_col = column_map.payment_received_col
+    total_agreement_col = column_map.total_agreement_col
+    budgeted_date_col = column_map.budgeted_date_col
+    demand_gen_col = column_map.demand_gen_col
+    milestone_status_col = column_map.milestone_status_col
+    property_name = column_map.property_name
+    customer_name = column_map.customer_name
+    active_col = column_map.active_col
+    application_booking_id = column_map.application_booking_id
+    tax_col = column_map.tax_col
+    tower_col = column_map.tower_col
+    type_col = column_map.type_col
+    milestone_name_col = column_map.milestone_name
+    other_charges = column_map.other_charges
 
-    df[property_name] = df[property_name].astype(str).str.strip()
-
-    # Sidebar parameters
-    overdue_threshold = st.sidebar.number_input("Overdue threshold (₹)", min_value=0, value=1000, step=500)
-    show_raw = st.sidebar.checkbox("Show raw working tables", value=False)
-
-    # ---------- Computations (cached) ----------
+    # ---------- Legacy computations kept for existing charts/tables ----------
     @st.cache_data(ttl=900)
-    def compute_kpis(_df: pd.DataFrame, _today: pd.Timestamp):
+    def compute_working_data(_df: pd.DataFrame, _today: pd.Timestamp):
         d = _df.copy()
 
         # Agreement value per booking = sum of dues
@@ -263,7 +265,45 @@ def render_dashboard(df: pd.DataFrame, today):
             "overdue_all": overdue_all,
         }
 
-    data = compute_kpis(df, today)
+    # Produce working data for legacy visualizations
+    data = compute_working_data(df, today)
+
+
+
+
+    # Compute KPIs and trend
+    kpis = compute_kpis_service(df, today, column_map)
+    trend_data = compute_monthly_trend(df, today, column_map)
+
+    # Render KPI strip
+    render_kpi_strip(kpis)
+
+    # Render monthly trend
+    render_monthly_trend(trend_data)
+
+    # Sidebar controls
+    st.sidebar.markdown("### ⚙️ Threshold Settings")
+    overdue_threshold = st.sidebar.number_input(
+        "Overdue Amount Threshold (₹)",
+        min_value=0,
+        value=1000,
+        step=100,
+        help="Minimum amount to consider for overdue analysis"
+    )
+
+    booking_mismatch_tolerance = st.sidebar.number_input(
+        "Booking Mismatch Tolerance (₹)",
+        min_value=0,
+        value=1000,
+        step=100,
+        help="Tolerance for agreement value vs total due mismatch"
+    )
+    # Toggle to display the working dataset used for visuals
+    show_raw = st.sidebar.checkbox("Show raw working tables", value=False)
+
+
+    # Continue with existing dashboard logic...
+    # (Keep all existing charts and tables, just add the new components above)
 
     d = data["df"]
     booked_df = data["booked_df"]
@@ -483,7 +523,7 @@ def render_dashboard(df: pd.DataFrame, today):
     st.markdown("""
         ### 📅 Expected Future Total Collection
         <small>
-        <sup>ℹ️</sup> 
+        <sup>ℹ️</sup>
         <span title="This table shows expected collections grouped by Budgeted Date month (future only). Amounts in ₹ Cr.">
         <em>What does this mean?</em></span>
         </small>
