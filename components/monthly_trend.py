@@ -5,7 +5,7 @@ from utils.helper import to_cr
 
 
 def render_monthly_trend(trend_df):
-    """Render stacked bar chart with expected vs actual collections"""
+    """Render grouped double bar chart for expected vs actual collections"""
     st.subheader("📈 Monthly Collection Trend (Last 24 Months)")
 
     # Convert to Cr for display
@@ -15,8 +15,15 @@ def render_monthly_trend(trend_df):
 
     display_df['Month_str'] = display_df.index.strftime('%b %Y')
 
-    # Create stacked bar chart
+    # Create grouped double bar chart for Expected vs Actuals
     fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        name='Expected',
+        x=display_df['Month_str'],
+        y=display_df['Expected_Cr'],
+        marker_color='#1f77b4'
+    ))
 
     fig.add_trace(go.Bar(
         name='Actuals',
@@ -25,18 +32,11 @@ def render_monthly_trend(trend_df):
         marker_color='#2E8B57'
     ))
 
-    fig.add_trace(go.Bar(
-        name='Misses',
-        x=display_df['Month_str'],
-        y=display_df['Misses_Cr'],
-        marker_color='#DC143C'
-    ))
-
     fig.update_layout(
         title="Expected vs Actual Collections",
         xaxis_title="Month",
         yaxis_title="Amount (₹ Cr)",
-        barmode='stack',
+        barmode='group',
         height=400
     )
 

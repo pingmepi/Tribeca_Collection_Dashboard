@@ -4,7 +4,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from utils.types import ColumnMapping
 from utils.helper import get_column, highlight_rows, bucket, percent
-from services.compute import compute_kpis as compute_kpis_service, compute_monthly_trend
+from services.compute import (
+    compute_kpis as compute_kpis_service,
+    compute_monthly_trend,
+    compute_working_data,
+    preprocess_df,
+)
+from services.validation import run_validations
 from components.kpi_strip import render_kpi_strip
 from components.monthly_trend import render_monthly_trend
 
@@ -64,27 +70,7 @@ def render_dashboard(df: pd.DataFrame, today):
         other_charges=get_column(df, "Other Charges (Corpus+Maintenance)", "Corpus+Maintenance", "Corpus Maintenance", "Other Charges", label="Other Charges")
     )
 
-    # Ensure baseline types for new services and legacy logic
-    # Convert date-like columns if present
-    for c in [
-        "Booking Date", "Agreement Registration Date", "Registration Date",
-        "Actual Payment Date", "Payment Received Date", "Receipt Date",
-        "Demand Generation Date", "Demand generation date", "Demand Raised Date", "Invoice Date",
-        "Budgeted Date", "Planned Demand Date"
-    ]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors='coerce', dayfirst=True)
-
-    # Convert currency/amount-like columns if present
-    for c in [
-        "Total Agreement Value", "Agreement Value", "Agreement Amount",
-        "Total Amount Due", "Amount Due", "Due Amount",
-        "Payment Received", "Amount Received",
-        "Total Service Tax On PPD", "Tax Amount", "GST Amount", "Total Tax",
-        "Other Charges (Corpus+Maintenance)", "Corpus+Maintenance", "Corpus Maintenance", "Other Charges"
-    ]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[₹,]', '', regex=True), errors='coerce')
+    # Types are standardized in the service layer via preprocess_df
     # Bind column names to local variables for legacy logic below
     booking_col = column_map.booking_col
     reg_date_col = column_map.reg_date_col
@@ -104,183 +90,6 @@ def render_dashboard(df: pd.DataFrame, today):
     type_col = column_map.type_col
     milestone_name_col = column_map.milestone_name
     other_charges = column_map.other_charges
-
-    # ---------- Legacy computations kept for existing charts/tables ----------
-    @st.cache_data(ttl=900)
-    def compute_working_data(_df: pd.DataFrame, _today: pd.Timestamp):
-        d = _df.copy()
-
-        # Agreement value per booking = sum of dues
-        d['Agreement value'] = d.groupby(application_booking_id)[amount_due_col].transform('sum')
-
-        # Total Payment Received per booking (gross sum of payments on any row with payment date present)
-        filtered_pay_df = d[d[payment_received_col].notnull()].copy()
-        total_pay_per_booking = (
-            filtered_pay_df.groupby(application_booking_id)[payment_received_col].sum().reset_index()
-            .rename(columns={payment_received_col: 'Total Payment Received'})
-        )
-        d = d.merge(total_pay_per_booking, on=application_booking_id, how='left')
-        d['Total Payment Received'] = d['Total Payment Received'].fillna(0)
-
-        # Total Demand Generated Till Date (sum dues where demand_gen < today)
-        filtered_due_df = d[d[demand_gen_col].notna() & (d[demand_gen_col] < _today)].copy()
-        due_totals = (
-            filtered_due_df.groupby(application_booking_id)[amount_due_col].sum().reset_index()
-            .rename(columns={amount_due_col: 'Total Demand Generated Till Date'})
-        )
-        d = d.merge(due_totals, on=application_booking_id, how='left')
-        d['Total Demand Generated Till Date'] = d['Total Demand Generated Till Date'].fillna(0)
-
-        # Budget Passed, Demand Not Generated
-        delayed_demand_df = d[
-            d[budgeted_date_col].notna() & (d[budgeted_date_col] <= _today) & (d[demand_gen_col].isna())
-        ].copy()
-        delayed_totals = (
-            delayed_demand_df.groupby(application_booking_id)[amount_due_col].sum().reset_index()
-            .rename(columns={amount_due_col: 'Budget Passed, Demand Not Generated'})
-        )
-        d = d.merge(delayed_totals, on=application_booking_id, how='left')
-        d['Budget Passed, Demand Not Generated'] = d['Budget Passed, Demand Not Generated'].fillna(0)
-
-        # Expected Future Demand
-        future_demand_df = d[
-            d[budgeted_date_col].notna() & (d[budgeted_date_col] > _today) & (d[demand_gen_col].isna())
-        ].copy()
-        future_total = (
-            future_demand_df.groupby(application_booking_id)[amount_due_col].sum().reset_index()
-            .rename(columns={amount_due_col: 'Expected Future Demand'})
-        )
-        d = d.merge(future_total, on=application_booking_id, how='left')
-        d['Expected Future Demand'] = d['Expected Future Demand'].fillna(0)
-
-        # Net payment received (after tax) and Amount Overdue at line level for rows where demand exists
-        filtered = d[d[demand_gen_col].notnull()].copy()
-        filtered['Net payment received (AV)'] = (filtered[payment_received_col] - filtered[tax_col]).clip(lower=0)
-        filtered['Amount Overdue'] = filtered[amount_due_col] - filtered['Net payment received (AV)']
-
-        # Aggregate overdue & net payment per booking
-        overdue_df = (
-            filtered.groupby(application_booking_id)[['Net payment received (AV)', 'Amount Overdue']]
-            .sum().reset_index()
-        )
-        d = d.merge(overdue_df, on=application_booking_id, how='left')
-        d['Amount Overdue'] = d['Amount Overdue'].fillna(0)
-        d['Net payment received (AV)'] = d['Net payment received (AV)'].fillna(0)
-
-        # Registered/Unregistered partitions
-        booked_df = d[d[application_booking_id].notnull()].copy()
-        reg_df = booked_df[booked_df[reg_date_col].notnull()].copy()
-        unreg_df = booked_df[booked_df[reg_date_col].isnull()].copy()
-
-        # Latest row per booking (by demand then budget date) for some per-booking rollups
-        sort_cols = [application_booking_id, demand_gen_col, budgeted_date_col]
-        d_sorted = d.sort_values(sort_cols)
-        last_by_booking = d_sorted.groupby(application_booking_id, as_index=False).last()
-
-        # Aggregate KPIs
-        total_units = d[property_name].nunique()
-        booked_units = booked_df[application_booking_id].nunique()
-        reg_units = reg_df[application_booking_id].nunique()
-        unreg_units = unreg_df[application_booking_id].nunique()
-
-        # Agreement totals
-        total_sales_act = booked_df.groupby(application_booking_id)[total_agreement_col].first().sum()
-        reg_sales_act = reg_df.groupby(application_booking_id)[total_agreement_col].first().sum()
-        unreg_sales_act = unreg_df.groupby(application_booking_id)[total_agreement_col].first().sum()
-
-        total_corpus = booked_df.groupby(application_booking_id)[other_charges].first().sum()
-        reg_corpus = reg_df.groupby(application_booking_id)[other_charges].first().sum()
-        unreg_corpus = unreg_df.groupby(application_booking_id)[other_charges].first().sum()
-
-        total_sales = booked_df.groupby(application_booking_id)['Agreement value'].first().sum()
-        reg_sales = reg_df.groupby(application_booking_id)['Agreement value'].first().sum()
-        unreg_sales = unreg_df.groupby(application_booking_id)['Agreement value'].first().sum()
-
-        # Demand buckets
-        total_due = filtered_due_df[amount_due_col].sum()
-        reg_due = reg_df.groupby(application_booking_id).tail(1)['Total Demand Generated Till Date'].sum()
-        unreg_due = unreg_df.groupby(application_booking_id).tail(1)['Total Demand Generated Till Date'].sum()
-
-        total_due_n = delayed_demand_df[amount_due_col].sum()
-        reg_due_n = reg_df.groupby(application_booking_id).tail(1)['Budget Passed, Demand Not Generated'].sum()
-        unreg_due_n = unreg_df.groupby(application_booking_id).tail(1)['Budget Passed, Demand Not Generated'].sum()
-
-        total_due_nn = future_demand_df[amount_due_col].sum()
-        reg_due_nn = reg_df.groupby(application_booking_id).tail(1)['Expected Future Demand'].sum()
-        unreg_due_nn = unreg_df.groupby(application_booking_id).tail(1)['Expected Future Demand'].sum()
-
-        # Collections (no tax)
-        total_collected_notax = last_by_booking['Net payment received (AV)'].sum()
-        reg_collected_notax = (
-            reg_df.sort_values(sort_cols).groupby(application_booking_id).last()['Net payment received (AV)'].sum()
-            if not reg_df.empty else 0
-        )
-        unreg_collected_notax = (
-            unreg_df.sort_values(sort_cols).groupby(application_booking_id).last()['Net payment received (AV)'].sum()
-            if not unreg_df.empty else 0
-        )
-
-        # Overdue (apply threshold at the very end in presenter)
-        overdue_all = d[d['Amount Overdue'] > 0].copy()
-
-        # For ageing: prepare copies
-        copy_df = filtered.copy()
-
-        return {
-            "df": d,
-            "booked_df": booked_df,
-            "reg_df": reg_df,
-            "unreg_df": unreg_df,
-            "filtered_due_df": filtered_due_df,
-            "delayed_demand_df": delayed_demand_df,
-            "future_demand_df": future_demand_df,
-            "copy_df": copy_df,
-            "totals": {
-                "total_units": total_units,
-                "booked_units": booked_units,
-                "reg_units": reg_units,
-                "unreg_units": unreg_units,
-                "total_sales_act": total_sales_act,
-                "reg_sales_act": reg_sales_act,
-                "unreg_sales_act": unreg_sales_act,
-                "total_corpus": total_corpus,
-                "reg_corpus": reg_corpus,
-                "unreg_corpus": unreg_corpus,
-                "total_sales": total_sales,
-                "reg_sales": reg_sales,
-                "unreg_sales": unreg_sales,
-                "total_due": total_due,
-                "reg_due": reg_due,
-                "unreg_due": unreg_due,
-                "total_due_n": total_due_n,
-                "reg_due_n": reg_due_n,
-                "unreg_due_n": unreg_due_n,
-                "total_due_nn": total_due_nn,
-                "reg_due_nn": reg_due_nn,
-                "unreg_due_nn": unreg_due_nn,
-                "total_collected_notax": total_collected_notax,
-                "reg_collected_notax": reg_collected_notax,
-                "unreg_collected_notax": unreg_collected_notax,
-            },
-            "overdue_all": overdue_all,
-        }
-
-    # Produce working data for legacy visualizations
-    data = compute_working_data(df, today)
-
-
-
-
-    # Compute KPIs and trend
-    kpis = compute_kpis_service(df, today, column_map)
-    trend_data = compute_monthly_trend(df, today, column_map)
-
-    # Render KPI strip
-    render_kpi_strip(kpis)
-
-    # Render monthly trend
-    render_monthly_trend(trend_data)
-
     # Sidebar controls
     st.sidebar.markdown("### ⚙️ Threshold Settings")
     overdue_threshold = st.sidebar.number_input(
@@ -290,6 +99,149 @@ def render_dashboard(df: pd.DataFrame, today):
         step=100,
         help="Minimum amount to consider for overdue analysis"
     )
+
+
+    # Run validation and show warnings upfront
+    validations = run_validations(df, column_map)
+    for msg in validations.get("messages", []):
+        if msg:
+            st.sidebar.warning(msg)
+
+    # Produce working data for legacy visualizations (centralized in services)
+    data = compute_working_data(df, today, column_map)
+
+    # Compute KPIs and trend via services
+    kpis = compute_kpis_service(df, today, column_map, overdue_threshold=overdue_threshold)
+    trend_data = compute_monthly_trend(df, today, column_map)
+
+    # Render Ideal KPI strip at the top (replaces older strip)
+    from components.ideal_kpi_strip import render_ideal_kpi_strip
+    render_ideal_kpi_strip(df, today, column_map)
+
+    # Per-property Corpus + Maintenance breakdown (deduped per property)
+    d_kpi = preprocess_df(df, column_map)
+    try:
+        prop_col = column_map.property_name
+        corpus_col = column_map.other_charges
+    except Exception:
+        prop_col = None
+        corpus_col = None
+
+    if prop_col and corpus_col and (prop_col in d_kpi.columns) and (corpus_col in d_kpi.columns):
+        # Build per-property metrics
+        amt_col = column_map.amount_due_col
+        pay_col = column_map.payment_received_col
+        tax_col_local = column_map.tax_col
+        reg_col = column_map.reg_date_col
+        bud_col = column_map.budgeted_date_col
+        dem_col = column_map.demand_gen_col
+
+        dpp = d_kpi.copy()
+        # Net payment after tax (clip at 0)
+        if pay_col in dpp.columns and tax_col_local in dpp.columns:
+            dpp['__net_payment__'] = (dpp[pay_col].fillna(0) - dpp[tax_col_local].fillna(0)).clip(lower=0)
+        else:
+            dpp['__net_payment__'] = 0
+
+        # Agreement Value per property = sum of dues
+        agreement_by_prop = dpp.groupby(prop_col)[amt_col].sum()
+        # Corpus + Maintenance per property = first value
+        corpus_by_prop = dpp.groupby(prop_col)[corpus_col].first()
+        # Value of Unit = Agreement + Corpus
+        value_unit_by_prop = agreement_by_prop.add(corpus_by_prop.fillna(0), fill_value=0)
+
+        # Total Demand Generated (< today)
+        demand_mask = dpp[dem_col].notna() & (dpp[dem_col] < today)
+        demand_by_prop = dpp.loc[demand_mask].groupby(prop_col)[amt_col].sum()
+
+        # Expected Future Demand (> today & demand not generated)
+        future_mask = dpp[bud_col].notna() & (dpp[bud_col] > today) & (dpp[dem_col].isna())
+        future_by_prop = dpp.loc[future_mask].groupby(prop_col)[amt_col].sum()
+
+        # Budget Passed, Demand Not Generated (<= today & demand not generated)
+        budget_passed_mask = dpp[bud_col].notna() & (dpp[bud_col] <= today) & (dpp[dem_col].isna())
+        budget_passed_by_prop = dpp.loc[budget_passed_mask].groupby(prop_col)[amt_col].sum()
+
+        # Total Collection (sum of net payment)
+        collection_by_prop = dpp.groupby(prop_col)['__net_payment__'].sum()
+
+        # Amount Overdue (on rows where demand exists): (due - net), clipped at 0
+        overdue_rows = dpp[dpp[dem_col].notna()].copy()
+        overdue_rows['__overdue__'] = (overdue_rows[amt_col] - overdue_rows['__net_payment__']).clip(lower=0)
+        overdue_by_prop = overdue_rows.groupby(prop_col)['__overdue__'].sum()
+
+        # Registration status per property
+        reg_status = dpp.groupby(prop_col)[reg_col].apply(lambda s: 'Registered' if s.notna().any() else 'Not Registered')
+
+        # Assemble table
+        prop_index = sorted(set(dpp[prop_col].dropna().unique()))
+        import pandas as _pd
+        metrics_df = _pd.DataFrame(index=prop_index)
+        metrics_df['Agreement Value (₹ Cr)'] = agreement_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Corpus + Maintenance (₹ Cr)'] = corpus_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Value of Unit (₹ Cr)'] = value_unit_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Total Demand Generated (₹ Cr)'] = demand_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Total Collection (₹ Cr)'] = collection_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Amount Overdue (₹ Cr)'] = overdue_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Expected Future Demand (₹ Cr)'] = future_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Budget Passed, Demand Not Generated (₹ Cr)'] = budget_passed_by_prop.reindex(prop_index).fillna(0).apply(to_cr)
+        metrics_df['Registration Status'] = reg_status.reindex(prop_index).fillna('Not Registered')
+
+        metrics_df = metrics_df.reset_index().rename(columns={'index': 'Property'})
+        # Sort by Value of Unit descending
+        metrics_df = metrics_df.sort_values(by='Value of Unit (₹ Cr)', ascending=False)
+
+        # Amount Yet to be Collected by Booking (per spec: sum of positive (Amount Due - Payment Received) across milestones)
+        booking_col = column_map.application_booking_id
+        amt_col2 = column_map.amount_due_col
+        pay_col2 = column_map.payment_received_col
+        if all(c in d_kpi.columns for c in [booking_col, amt_col2, pay_col2]):
+            cust_col = column_map.customer_name
+            prop_col2 = column_map.property_name
+            cols = [booking_col, amt_col2, pay_col2] + [c for c in [cust_col, prop_col2] if c in d_kpi.columns]
+            d_ayc = d_kpi[cols].copy()
+            d_ayc[pay_col2] = d_ayc[pay_col2].fillna(0)
+            d_ayc[amt_col2] = d_ayc[amt_col2].fillna(0)
+            d_ayc['__outstanding_row__'] = (d_ayc[amt_col2] - d_ayc[pay_col2]).clip(lower=0)
+            # Aggregate per booking, carry representative Property and Customer (first non-null)
+            group_fields = {"__outstanding_row__": 'sum'}
+            show_cols = {'__outstanding_row__': 'Amount Yet to be Collected', booking_col: 'Booking ID'}
+            if cust_col in d_ayc.columns:
+                group_fields[cust_col] = 'first'
+                show_cols[cust_col] = 'Customer Name'
+            if prop_col2 in d_ayc.columns:
+                group_fields[prop_col2] = 'first'
+                show_cols[prop_col2] = 'Property Name'
+
+            per_booking = (
+                d_ayc.groupby(booking_col)
+                    .agg(group_fields)
+                    .reset_index()
+                    .rename(columns=show_cols)
+            )
+            per_booking['Amount Yet to be Collected (₹)'] = per_booking['Amount Yet to be Collected'].apply(fmt_inr)
+            per_booking['Amount Yet to be Collected (₹ Cr)'] = per_booking['Amount Yet to be Collected'].apply(to_cr)
+            # Prefer showing Booking ID, Customer, Property, and the two display columns
+            display_cols = [c for c in ['Booking ID', 'Customer Name', 'Property Name', 'Amount Yet to be Collected (₹)', 'Amount Yet to be Collected (₹ Cr)'] if c in per_booking.columns]
+            per_booking = per_booking[display_cols]
+            per_booking = per_booking.sort_values(by='Amount Yet to be Collected (₹ Cr)', ascending=False)
+
+            with st.expander("📄 Amount Yet to be Collected by Booking", expanded=False):
+                st.dataframe(per_booking, use_container_width=True)
+                total_outstanding = (d_ayc['__outstanding_row__'].groupby(d_ayc[booking_col]).sum()).sum()
+                st.caption(f"Total: {fmt_inr(total_outstanding)} (₹{to_cr(total_outstanding):.2f} Cr)")
+
+
+    # Separator before trend
+    st.markdown("---")
+
+    # Separator before trend
+    st.markdown("---")
+    render_monthly_trend(trend_data)
+
+    # Sidebar controls
+    st.sidebar.markdown("### ⚙️ Threshold Settings")
+    # overdue_threshold already captured above
 
     booking_mismatch_tolerance = st.sidebar.number_input(
         "Booking Mismatch Tolerance (₹)",
@@ -320,100 +272,13 @@ def render_dashboard(df: pd.DataFrame, today):
     overdue = d[d['Amount Overdue'] > overdue_threshold].copy()
 
     # ---------- Header KPIs ----------
-    st.dataframe(d, use_container_width=True)
 
-    # Expected Future Collection from uncompleted milestones (uses amount_due_col variable consistently)
-    uncompleted_milestones = d[d[milestone_status_col] == 0] if milestone_status_col in d.columns else d.head(0)
-    expected_future_collection_cr = to_cr(uncompleted_milestones[amount_due_col].sum())
 
-    col1, col2 = st.columns(2)
-    col1.metric(label="Total Units", value=int(totals["total_units"]))
-    col2.metric(
-        label="Expected Future Total Collection",
-        value=f"{fmt_inr(expected_future_collection_cr)} Cr".replace('₹', ''),  # show only Cr formatted number
-        help="Total amount due from milestones not yet completed."
-    )
 
-    # ---------- Summary Table ----------
-    summary_df = pd.DataFrame({
-        "Metric": [
-            "Total Units Booked",
-            "Total Agreement Value",
-            "Corpus+Maintenance",
-            "Total Agreement Value (Added Corpus+Maintenance)",
-            "Total Agreement Value (Sum of All Dues)",
-            "Total Demand Till Date",
-            "Budget Passed, Demand Not Raised",
-            "Expected Future Demand",
-            "Amount Collected (Without TAX)",
-            "Amount Overdue"
-        ],
-        "All Units": [
-            int(totals["booked_units"]),
-            f"₹{to_cr(totals['total_sales_act']):,.2f} Cr",
-            f"₹{to_cr(totals['total_corpus']):,.2f} Cr",
-            f"₹{to_cr(totals['total_sales_act'] + totals['total_corpus']):,.2f} Cr",
-            f"₹{to_cr(totals['total_sales']):,.2f} Cr",
-            percent(totals["total_due"], totals["total_sales"]),
-            percent(totals["total_due_n"], totals["total_sales"]),
-            percent(totals["total_due_nn"], totals["total_sales"]),
-            percent(totals["total_collected_notax"], totals["total_sales"]),
-            percent(overdue.groupby(application_booking_id)['Amount Overdue'].sum().sum(), totals["total_sales"])
-        ],
-        "Registered Users": [
-            int(totals["reg_units"]),
-            f"₹{to_cr(totals['reg_sales_act']):,.2f} Cr",
-            f"₹{to_cr(totals['reg_corpus']):,.2f} Cr",
-            f"₹{to_cr(totals['reg_sales_act'] + totals['reg_corpus']):,.2f} Cr",
-            f"₹{to_cr(totals['reg_sales']):,.2f} Cr",
-            percent(reg_df.groupby(application_booking_id).tail(1)['Total Demand Generated Till Date'].sum(), totals["reg_sales"]),
-            percent(reg_df.groupby(application_booking_id).tail(1)['Budget Passed, Demand Not Generated'].sum(), totals["reg_sales"]),
-            percent(reg_df.groupby(application_booking_id).tail(1)['Expected Future Demand'].sum(), totals["reg_sales"]),
-            percent(reg_df.groupby(application_booking_id).tail(1)['Net payment received (AV)'].sum(), totals["reg_sales"]),
-            percent(reg_df.groupby(application_booking_id).tail(1)['Amount Overdue'].sum(), totals["reg_sales"])
-        ],
-        "Unregistered Users": [
-            int(totals["unreg_units"]),
-            f"₹{to_cr(totals['unreg_sales_act']):,.2f} Cr",
-            f"₹{to_cr(totals['unreg_corpus']):,.2f} Cr",
-            f"₹{to_cr(totals['unreg_sales_act'] + totals['unreg_corpus']):,.2f} Cr",
-            f"₹{to_cr(totals['unreg_sales']):,.2f} Cr",
-            percent(unreg_df.groupby(application_booking_id).tail(1)['Total Demand Generated Till Date'].sum(), totals["unreg_sales"]),
-            percent(unreg_df.groupby(application_booking_id).tail(1)['Budget Passed, Demand Not Generated'].sum(), totals["unreg_sales"]),
-            percent(unreg_df.groupby(application_booking_id).tail(1)['Expected Future Demand'].sum(), totals["unreg_sales"]),
-            percent(unreg_df.groupby(application_booking_id).tail(1)['Net payment received (AV)'].sum(), totals["unreg_sales"]),
-            percent(unreg_df.groupby(application_booking_id).tail(1)['Amount Overdue'].sum(), totals["unreg_sales"])
-        ]
-    })
 
-    styled_df = summary_df.style \
-        .apply(highlight_rows, axis=1) \
-        .set_properties(**{'text-align': 'center', 'font-size': '16px'}) \
-        .set_table_styles([dict(selector='th', props=[('background-color', '#f0f0f5'), ('color', '#333'), ('font-weight', 'bold')])])
-
-    st.dataframe(styled_df, use_container_width=True)
-
-    # ---------- Pie Charts ----------
-    col1, col2 = st.columns(2)
-    with col1:
-        tmp = booked_df.assign(
-            **{'Registration Status': booked_df[reg_date_col].notna().map({True: 'Registered', False: 'Not Registered'})}
-        )
-        unit_status = tmp.drop_duplicates(subset=[application_booking_id])
-        reg_summary = unit_status['Registration Status'].value_counts().reset_index()
-        reg_summary.columns = ['Registration Status', 'Count']
-        fig1 = px.pie(reg_summary, names='Registration Status', values='Count', title='Registration Status of Units', hole=0.4)
-        st.plotly_chart(fig1, use_container_width=True)
-    with col2:
-        labels = ['Amount Collected (Without Tax)', 'Amount Overdue']
-        values = [
-            reg_df.groupby(application_booking_id).tail(1)['Net payment received (AV)'].sum()
-            + unreg_df.groupby(application_booking_id).tail(1)['Net payment received (AV)'].sum(),
-            overdue.groupby(application_booking_id).tail(1)['Amount Overdue'].sum()
-        ]
-        dff = pd.DataFrame({'Status': labels, 'Amount (Cr)': list(map(to_cr, values))})
-        fig2 = px.pie(dff, names='Status', values='Amount (Cr)', title='Collection Due vs Not Due', hole=0.4)
-        st.plotly_chart(fig2, use_container_width=True)
+    # Section: Detailed Analysis
+    st.markdown("---")
+    st.markdown("### 📋 Detailed Analysis")
 
     # ---------- Ageing Analysis ----------
     bucket_order = ['< 30 Days', '31 - 60 Days', '61 - 90 Days', '> 90 Days']
@@ -422,8 +287,9 @@ def render_dashboard(df: pd.DataFrame, today):
 
     with col5:
         st.markdown("**Unregistered User Ageing (Days Since Booking)**")
+        unreg_booking_dt = pd.to_datetime(unreg_df[booking_col], errors='coerce', dayfirst=True)
         unreg_age = (
-            unreg_df.assign(days_since_booking=(today - unreg_df[booking_col]).dt.days)
+            unreg_df.assign(days_since_booking=(today - unreg_booking_dt).dt.days)
                     .assign(booking_age_bucket=lambda d: d['days_since_booking'].apply(bucket))
         )
         bucket_counts = (
@@ -438,12 +304,14 @@ def render_dashboard(df: pd.DataFrame, today):
 
     with col6:
         st.markdown("**Registered User TAT (Booking to Registration)**")
+        reg_booking_dt = pd.to_datetime(reg_df[booking_col], errors='coerce', dayfirst=True)
+        reg_reg_dt = pd.to_datetime(reg_df[reg_date_col], errors='coerce', dayfirst=True)
         reg_age = (
-            reg_df.assign(tat_days=(reg_df[reg_date_col] - reg_df[booking_col]).dt.days)
+            reg_df.assign(tat_days=(reg_reg_dt - reg_booking_dt).dt.days)
                   .assign(tat_bucket=lambda d: d['tat_days'].apply(bucket))
         )
         bucket_counts_registered = (
-            reg_age.groupby('tat_bucket')[property_name]
+            reg_age.groupby('tat_bucket')[application_booking_id]
                    .nunique()
                    .reindex(bucket_order, fill_value=0)
                    .reset_index()
@@ -454,10 +322,13 @@ def render_dashboard(df: pd.DataFrame, today):
 
     with col7:
         st.markdown("**Overdue Ageing**")
-        overdue_filtered = (
-            d[d[demand_gen_col].notnull()].copy()
-             .assign(overdue_days=(today - (d[demand_gen_col] + pd.to_timedelta(15, unit='D'))).dt.days)
-        )
+        overdue_filtered = d.copy()
+        # Only consider rows with a demand and positive overdue
+        overdue_filtered = overdue_filtered[overdue_filtered[demand_gen_col].notnull()].copy()
+        # Compute overdue_days from demand date + 15 days
+        demand_dt = pd.to_datetime(overdue_filtered[demand_gen_col], errors='coerce', dayfirst=True)
+        overdue_filtered['overdue_days'] = (today - (demand_dt + pd.to_timedelta(15, unit='D'))).dt.days
+        # Apply threshold
         overdue_filtered = overdue_filtered[overdue_filtered['Amount Overdue'] > overdue_threshold].copy()
         overdue_filtered['overdue_bucket'] = overdue_filtered['overdue_days'].apply(bucket)
 
@@ -474,7 +345,6 @@ def render_dashboard(df: pd.DataFrame, today):
         st.bar_chart(bucket_summary.set_index('Overdue Bucket')[['User Count']])
 
     # ---------- Overdue Customers ----------
-    st.markdown("**Overdue Customers List**")
     overdue_customers = d[d['Amount Overdue'] > overdue_threshold].copy()
     customer_table = (
         overdue_customers.groupby([customer_name, property_name])['Amount Overdue']
@@ -484,40 +354,9 @@ def render_dashboard(df: pd.DataFrame, today):
     )
     customer_table['Amount Overdue (Lakhs)'] = customer_table['Amount Overdue'] / 1e5
     customer_table = customer_table.drop(columns=['Amount Overdue'])
-    st.dataframe(customer_table, use_container_width=True)
+    with st.expander(f"👥 Overdue Customers Details ({len(customer_table)} found)", expanded=False):
+        st.dataframe(customer_table, use_container_width=True)
 
-    # ---------- Monthly Collections (last 2 years) ----------
-    copy_df = copy_df.copy()
-    copy_df['Month'] = pd.to_datetime(copy_df[actual_payment_col].dt.to_period("M").astype(str))
-    two_years_ago = pd.to_datetime(today) - pd.DateOffset(years=2)
-    filtered_mc = copy_df[copy_df['Month'] >= two_years_ago]
-
-    monthly_summary = (
-        filtered_mc.groupby('Month')['Net payment received (AV)']
-                   .sum()
-                   .reset_index()
-    )
-    monthly_summary['Net payment received (AV)'] = monthly_summary['Net payment received (AV)'].apply(to_cr)
-    monthly_summary['Month_str'] = monthly_summary['Month'].dt.strftime('%b %Y')
-
-    fig = px.bar(
-        monthly_summary,
-        x='Month_str',
-        y='Net payment received (AV)',
-        title="Monthly Collections (in ₹ Cr)",
-        labels={'Month_str': 'Month', 'Net payment received (AV)': '₹ Cr'},
-        text='Net payment received (AV)'
-    )
-    fig.update_traces(texttemplate='%{text:.2f}', textposition='outside')
-    fig.update_layout(xaxis_tickangle=-90)
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("📄 View Full Table"):
-        full_table = copy_df.groupby('Month')['Net payment received (AV)'].sum().reset_index()
-        full_table['Net payment received (AV)'] = full_table['Net payment received (AV)'].apply(to_cr)
-        full_table['Month'] = full_table['Month'].dt.strftime('%b %Y')
-        full_table = full_table.rename(columns={'Net payment received (AV)': "Actual Collection (₹ Cr)"})
-        st.dataframe(full_table, use_container_width=True)
 
     # ---------- Expected Future Total Collection ----------
     st.markdown("""
@@ -558,6 +397,6 @@ def render_dashboard(df: pd.DataFrame, today):
 
     # ---------- Raw tables toggle ----------
     if show_raw:
-        with st.expander("📄 View Full Project Dataset (Working)"):
+        with st.expander("📄 View Full Project Dataset (Working)", expanded=False):
             st.dataframe(d, use_container_width=True)
 
