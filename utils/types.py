@@ -8,7 +8,12 @@ class KPIMetrics:
     value_of_units_cr: float
     total_units_sold: int
     total_demand_generated_cr: float
+    total_demand_plus_tax_cr: float
+    tax_on_demand_cr: float
     total_collection_cr: float
+    tax_on_collections_cr: float
+    amount_yet_to_be_collected_cr: float
+    total_corpus_maintenance_cr: float
     units_registered: int
     units_unregistered: int
 

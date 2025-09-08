@@ -6,11 +6,11 @@ from utils.helper import get_column
 
 def check(df, today):
     df.columns = df.columns.str.strip() # -> Quality check for columns name.
-    ## List of columns 
+    ## List of columns
     # today = pd.to_datetime(st.sidebar.date_input("📅 Calculate Due As of Date", value=pd.to_datetime("today")))
     # gst_percentage = st.sidebar.number_input("💰 GST Percentage", min_value=0.0, max_value=100.0, value=5.0, step=0.1)
 
-    ## column entry 
+    ## column entry
     # Get dynamic mappings with fallback if default is missing
     other_charges = get_column(df, "Other Charges (Corpus+Maintenance)", label="Other Charges (Corpus+Maintenance)")
     booking_col = get_column(df, "Booking Date", label="Booking Date")
@@ -61,18 +61,20 @@ def check(df, today):
     if not invalid_book_df.empty:
         st.subheader("⚠️ Invalid Booking (Booked but Property Not Assigned)")
         st.warning(f"{len(invalid_book_df)} invalid Booking found!")
-        st.dataframe(invalid_book_df)
+        with st.expander(f"⚠️ Invalid Booking Details ({len(invalid_book_df)} found)", expanded=False):
+            st.dataframe(invalid_book_df)
     else:
         st.success("✅ All bookings are correctly mapped to properties.")
 
-        
-        
+
+
     invalid_regs = df[(df["is_registered"]) & (df[application_booking_id].isna())]
     invalid_regs_df = invalid_regs[[customer_name ]].drop_duplicates()
     if not invalid_regs.empty:
         st.subheader("⚠️ Invalid Registrations (Registered but not Booked)")
         st.warning(f"{len(invalid_regs)} invalid registrations found!")
-        st.dataframe(invalid_regs_df)
+        with st.expander(f"⚠️ Invalid Registration Details ({len(invalid_regs_df)} found)", expanded=False):
+            st.dataframe(invalid_regs_df)
     else:
         st.success("✅ All registrations are valid (booked).")
 
@@ -84,18 +86,20 @@ def check(df, today):
     if not invalid_payment_df.empty:
         st.subheader("⚠️ Payment Received Without Demand Raised")
         st.warning(f"{len(invalid_payment_df)} such cases found!")
-        st.dataframe(invalid_payment_df)
+        with st.expander(f"⚠️ Payment Without Demand Details ({len(invalid_payment_df)} found)", expanded=False):
+            st.dataframe(invalid_payment_df)
     else:
         st.success("✅ All payments are preceded by valid demands.")
 
-    
+
     # Check 7: Milestone Done but No Demand Raised
     milestone_done_no_demand = df[(df[milestone_status_col] == 1) & (df[demand_gen_col].isna())]
     milestone_done_no_demand_df = milestone_done_no_demand[[property_name,customer_name, milestone_name]].drop_duplicates()
     if not milestone_done_no_demand_df.empty:
         st.subheader("⚠️ Milestone Completed But No Demand Raised")
         st.warning(f"{len(milestone_done_no_demand_df)} such milestones found!")
-        st.dataframe(milestone_done_no_demand_df)
+        with st.expander(f"⚠️ Milestone Completed Without Demand Details ({len(milestone_done_no_demand_df)} found)", expanded=False):
+            st.dataframe(milestone_done_no_demand_df)
     else:
         st.success("✅ All completed milestones have demand raised.")
 
@@ -105,7 +109,8 @@ def check(df, today):
     if not budget_passed_no_demand_df.empty:
         st.subheader("⚠️ Budgeted Date Passed But No Demand Raised")
         st.warning(f"{len(budget_passed_no_demand_df)} such milestones found!")
-        st.dataframe(budget_passed_no_demand_df)
+        with st.expander(f"⚠️ Budget Passed Without Demand Details ({len(budget_passed_no_demand_df)} found)", expanded=False):
+            st.dataframe(budget_passed_no_demand_df)
     else:
         st.success("✅ All overdue milestones have raised demands.")
 
@@ -126,20 +131,82 @@ def check(df, today):
     if not invalid_financial_df.empty:
         st.subheader("⚠️ Booking Value Mismatch")
         st.warning(f"{len(invalid_financial_df)} entries found with mismatched booking values!")
-        st.dataframe(invalid_financial_df)
+        with st.expander(f"⚠️ Booking Value Mismatch Details ({len(invalid_financial_df)} found)", expanded=False):
+            st.dataframe(invalid_financial_df)
     else:
         st.success("✅ All booking value entries are within acceptable range.")
 
 
+    # Check 12.5: Date Consistency Tables (Registration/Payment earlier than Booking)
+    reg_issue = df[(df[reg_date_col].notna()) & (df[booking_col].notna()) & (df[reg_date_col] < df[booking_col])][[
+        property_name, customer_name, application_booking_id, booking_col, reg_date_col
+    ]].drop_duplicates()
+    pay_issue = df[(df[actual_payment_col].notna()) & (df[booking_col].notna()) & (df[actual_payment_col] < df[booking_col])][[
+        property_name, customer_name, application_booking_id, booking_col, actual_payment_col, payment_received_col
+    ]].drop_duplicates()
 
-    
+    if not reg_issue.empty or not pay_issue.empty:
+        st.subheader("⚠️ Date Consistency Issues")
+        st.warning(f"{len(reg_issue)} rows where Registration Date < Booking Date; {len(pay_issue)} rows where Payment Date < Booking Date.")
+        c1, c2 = st.columns(2)
+        def _download_link(df_in: pd.DataFrame, name: str):
+            csv = df_in.to_csv(index=False).encode('utf-8')
+            st.download_button(label=f"📥 Download {name}", data=csv, file_name=f"{name.lower().replace(' ', '_')}.csv", mime="text/csv")
+
+        # Render as two expanders stacked vertically
+        reg_tbl = reg_issue.rename(columns={
+            property_name: "Property Name",
+            customer_name: "Customer Name",
+            application_booking_id: "Booking ID",
+            booking_col: "Booking Date",
+            reg_date_col: "Registration Date",
+        })
+        pay_tbl = pay_issue.rename(columns={
+            property_name: "Property Name",
+            customer_name: "Customer Name",
+            application_booking_id: "Booking ID",
+            booking_col: "Booking Date",
+            actual_payment_col: "Payment Date",
+            payment_received_col: "Payment Received",
+        })
+
+        if not reg_tbl.empty:
+            with st.expander(f"Registration Date < Booking Date ({len(reg_tbl)} rows)", expanded=False):
+                st.dataframe(reg_tbl, use_container_width=True)
+                _download_link(reg_tbl, "registration_before_booking")
+
+        if not pay_tbl.empty:
+            with st.expander(f"Payment Date < Booking Date ({len(pay_tbl)} rows)", expanded=False):
+                st.dataframe(pay_tbl, use_container_width=True)
+                _download_link(pay_tbl, "payment_before_booking")
+    else:
+        st.success("✅ No date consistency issues found.")
+
+
+
+
     # Check 11: Duplicate Payments for Same Milestone
-    dup_payments = df[df.duplicated(subset=[application_booking_id, milestone_name, actual_payment_col], keep=False)]
-    dup_payments_df = dup_payments[[property_name,customer_name, application_booking_id, milestone_name, actual_payment_col]].drop_duplicates()
+    # Duplicates = multiple payment rows for the same Booking + Milestone (any payment date)
+    has_payment = df[payment_received_col].fillna(0) > 0
+    pay_rows = df.loc[has_payment].copy()
+    dup_groups = (
+        pay_rows.groupby([application_booking_id, milestone_name])
+                .size()
+                .reset_index(name='count')
+    )
+    dup_keys = dup_groups[dup_groups['count'] > 1][[application_booking_id, milestone_name]]
+    dup_payments_df = pay_rows.merge(dup_keys, on=[application_booking_id, milestone_name], how='inner')
+
     if not dup_payments_df.empty:
         st.subheader("⚠️ Duplicate Payments for Same Milestone")
-        st.warning(f"{len(dup_payments_df)} duplicate payment entries found!")
-        st.dataframe(dup_payments_df)
+        st.warning(f"{len(dup_payments_df)} rows across {len(dup_keys)} milestones with multiple payments found!")
+        cols = [property_name, customer_name, application_booking_id, milestone_name, actual_payment_col, payment_received_col, amount_due_col, tax_col]
+        cols = [c for c in cols if c in dup_payments_df.columns]
+        dup_payments_df = dup_payments_df[cols].sort_values([application_booking_id, milestone_name, actual_payment_col])
+        with st.expander(f"⚠️ Duplicate Payment Details ({len(dup_payments_df)} rows)", expanded=False):
+            st.dataframe(dup_payments_df, use_container_width=True)
+            csv = dup_payments_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download duplicate_payments.csv", csv, file_name="duplicate_payments.csv", mime="text/csv")
     else:
         st.success("✅ No duplicate milestone payments found.")
 
@@ -151,20 +218,21 @@ def check(df, today):
     if not invalid_percentage_sum.empty:
         st.subheader("⚠️ Total Milestone Percentage Not Equal to 100")
         st.warning(f"{len(invalid_percentage_sum)} such bookings found!")
-        
+
         # Merge with customer name for display
         invalid_percentage_df = invalid_percentage_sum.merge(
-            df[[property_name,application_booking_id, customer_name]].drop_duplicates(), 
-            on=application_booking_id, 
+            df[[property_name,application_booking_id, customer_name]].drop_duplicates(),
+            on=application_booking_id,
             how='left'
         )[[property_name,application_booking_id, customer_name, percentage_col]].drop_duplicates()
-        
-        st.dataframe(invalid_percentage_df.rename(columns={
-            property_name: "Property Name",
-            application_booking_id: "Booking ID",
-            customer_name: "Customer Name",
-            percentage_col: "Total %"
-        }))
+
+        with st.expander(f"⚠️ Milestone Percentage Issues Details ({len(invalid_percentage_df)} found)", expanded=False):
+            st.dataframe(invalid_percentage_df.rename(columns={
+                property_name: "Property Name",
+                application_booking_id: "Booking ID",
+                customer_name: "Customer Name",
+                percentage_col: "Total %"
+            }))
     else:
         st.success("✅ All bookings have milestone percentages summing up to 100.")
 
@@ -176,14 +244,15 @@ def check(df, today):
     if not invalid_tax_df.empty:
         st.subheader("⚠️ GST/TAX Greater Than Payment Received")
         st.warning(f"{len(invalid_tax_df)} entries found where tax exceeds payment!")
-        st.dataframe(invalid_tax_df)
+        with st.expander(f"⚠️ Tax Greater Than Payment Details ({len(invalid_tax_df)} found)", expanded=False):
+            st.dataframe(invalid_tax_df)
     else:
         st.success("✅ All tax entries are valid against payments.")
 
-    
-
-    
 
 
-    
+
+
+
+
 
