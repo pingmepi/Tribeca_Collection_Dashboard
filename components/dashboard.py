@@ -11,7 +11,6 @@ from services.compute import (
     preprocess_df,
 )
 from services.validation import run_validations
-from components.kpi_strip import render_kpi_strip
 from components.monthly_trend import render_monthly_trend
 
 # ---------- Utilities ----------

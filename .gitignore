@@ -44,3 +44,12 @@ htmlcov/
 .cache
 nosetests.xml
 test.py
+
+
+# Local spreadsheets and data files
+*.xlsx
+*.xls
+*.csv
+
+# Allow specific sample data if needed (uncomment to track a given file)
+#!docs/samples/example.csv
