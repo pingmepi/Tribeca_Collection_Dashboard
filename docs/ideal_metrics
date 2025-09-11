@@ -13,21 +13,18 @@ Row 1: Property Unit Metrics
 - Total units registered: Unique booking IDs where Registration Date is present.
 - Total units unregistered: Total units − Total units registered.
 
-Row 2: Property Sales Metrics
+Row 2: Property Sales Metrics (3 tiles)
 - Total agreement value: Sum of Agreement Value per booking (first value per booking to avoid duplication).
 - Total corpus + maintenance: Sum of Other Charges (Corpus + Maintenance) per booking (first value per booking).
-- Total tax: Sum of Tax across all rows (no date filter).
-- Total amount: Total agreement value + Total corpus + maintenance + Total tax.
+- Total amount (Agreement + Corpus): Total agreement value + Total corpus + maintenance. Note: excludes tax.
 
-Row 3: Property Demand Metrics
-- Total demand generated (without tax): Sum(Amount Due on demand) − Sum(Tax on demand).
+Row 3: Property Demand Metrics (3 tiles)
+- Total demand (without tax): Sum(Amount Due on demand) − Sum(Tax on demand).
 - Total tax on demand: Sum(Tax on demand).
-- Total corpus + maintenance (on demand): Sum of first Corpus + Maintenance per booking among rows with demand generated (deduped per booking).
-- Total due: Sum(Amount Due on demand).
+- Total due (with tax): Sum(Amount Due on demand).
 
-Row 4: Property Collection Metrics
+Row 4: Property Collection Metrics (3 tiles)
 - Total collection: Sum(Payment Received) for rows where Demand Generation Date is present and < today.
-- Total tax on collections: Sum(Tax) for rows where Actual Payment Date is present and < today.
-- Total collection (without tax): Total collection − Total tax on collections.
-- Total collection (without tax & corpus): Total collection (without tax) − Total corpus + maintenance.
-  Note: “Total corpus + maintenance” here refers to the per‑booking deduped total from Row 2 (not filtered by dates). If you prefer to base this on demand rows only, use the Row 3 “on demand” corpus value instead.
+- % collected from demand due: Total collection ÷ Total due (with tax). If Total due = 0, display 0%.
+- Total collection (without corpus): Total collection − Total corpus + maintenance (per‑booking deduped from Sales row).
+  Note: If you prefer to base corpus on demand rows only, substitute the "on demand" corpus value accordingly.

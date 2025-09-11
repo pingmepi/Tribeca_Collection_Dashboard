@@ -1,5 +1,7 @@
 import pandas as pd
 import streamlit as st
+import plotly.express as px
+
 from utils.helper import to_cr
 from services.compute import preprocess_df
 from utils.types import ColumnMapping
@@ -32,6 +34,48 @@ def render_ideal_kpi_strip(df, today, column_map: ColumnMapping):
     actual_payment_col = column_map.actual_payment_col
     demand_gen_col = column_map.demand_gen_col
 
+    # ---------------- Top Multi Bar Chart ----------------
+    # Compute key totals for the overview chart
+    booking_summary_top = d.groupby(bid).agg({
+        agreement_col: 'first',
+        other_charges: 'first',
+    }).reset_index() if bid in d.columns else pd.DataFrame()
+    av_total_top = booking_summary_top[agreement_col].fillna(0).sum() if not booking_summary_top.empty else 0.0
+    corpus_total_top = booking_summary_top[other_charges].fillna(0).sum() if not booking_summary_top.empty else 0.0
+    amount_ac_top = av_total_top + corpus_total_top
+
+    demand_mask_top = d[demand_gen_col].notna() & (d[demand_gen_col] < today) if demand_gen_col in d.columns else pd.Series(False, index=d.index)
+    due_total_top = d.loc[demand_mask_top, amount_due_col].fillna(0).sum() if amount_due_col in d.columns else 0.0
+    tax_on_demand_top = d.loc[demand_mask_top, tax_col].fillna(0).sum() if tax_col in d.columns else 0.0
+    demand_wo_tax_top = due_total_top - tax_on_demand_top
+
+    collection_total_top = d.loc[demand_mask_top, column_map.payment_received_col].fillna(0).sum() if column_map.payment_received_col in d.columns else 0.0
+
+    chart_df = pd.DataFrame({
+        'Metric': ['Amount (Agreement + Corpus)', 'Demand (Without Tax)', 'Collection'],
+        'Value (₹ Cr)': [to_cr(amount_ac_top), to_cr(demand_wo_tax_top), to_cr(collection_total_top)],
+    })
+    fig = px.bar(
+        chart_df,
+        x='Metric',
+        y='Value (₹ Cr)',
+        color='Metric',
+        text='Value (₹ Cr)',
+        title='Project Totals (₹ Cr)',
+        color_discrete_map={
+            'Amount (Agreement + Corpus)': '#001f3f',  # navy
+            'Demand (Without Tax)': '#0074D9',         # blue
+            'Collection': '#7F8C8D',                   # grey
+        }
+    )
+    fig.update_traces(texttemplate='%{text:.2f}', textposition='outside')
+    fig.update_layout(yaxis_title='₹ Cr', xaxis_title='', showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    demand_gen_col = column_map.demand_gen_col
+
     # ---------------- Row 1 ----------------
     st.markdown("#### Property Unit Metrics")
     r1 = st.columns(5)
@@ -61,73 +105,58 @@ def render_ideal_kpi_strip(df, today, column_map: ColumnMapping):
 
     # ---------------- Row 2 ----------------
     st.markdown("#### Property Sales Metrics")
-    r2 = st.columns(4)
+    r2 = st.columns(3)
     booking_summary = d.groupby(bid).agg({
         agreement_col: 'first',
         other_charges: 'first',
     }).reset_index() if bid in d.columns else pd.DataFrame()
     total_agreement_value = booking_summary[agreement_col].fillna(0).sum() if not booking_summary.empty else 0.0
     total_corpus_maint_bookings = booking_summary[other_charges].fillna(0).sum() if not booking_summary.empty else 0.0
-    total_tax_all = d[tax_col].fillna(0).sum() if tax_col in d.columns else 0.0
-    total_amount = total_agreement_value + total_corpus_maint_bookings + total_tax_all
+    # Total Amount (Agreement + Corpus), excludes tax per requirement
+    total_amount_ac = total_agreement_value + total_corpus_maint_bookings
 
     with r2[0]:
         st.metric("Total Agreement Value", f"₹{to_cr(total_agreement_value):.2f} Cr")
     with r2[1]:
         st.metric("Total Corpus + Maintenance", f"₹{to_cr(total_corpus_maint_bookings):.2f} Cr")
     with r2[2]:
-        st.metric("Total Tax", f"₹{to_cr(total_tax_all):.2f} Cr")
-    with r2[3]:
-        st.metric("Total Amount", f"₹{to_cr(total_amount):.2f} Cr")
+        st.metric("Total Amount (Agreement + Corpus)", f"₹{to_cr(total_amount_ac):.2f} Cr")
 
     st.divider()
 
     # ---------------- Row 3 ----------------
     st.markdown("#### Property Demand Metrics")
-    r3 = st.columns(4)
+    r3 = st.columns(3)
     demand_mask = d[demand_gen_col].notna() & (d[demand_gen_col] < today) if demand_gen_col in d.columns else pd.Series(False, index=d.index)
     total_due = d.loc[demand_mask, amount_due_col].fillna(0).sum() if amount_due_col in d.columns else 0.0
     total_tax_on_demand = d.loc[demand_mask, tax_col].fillna(0).sum() if tax_col in d.columns else 0.0
     total_demand_generated_without_tax = total_due - total_tax_on_demand
 
-    # total corpus+maintenance on demand (deduped per booking among rows with demand)
-    if demand_mask.any() and other_charges in d.columns:
-        d_dm = d.loc[demand_mask].copy()
-        corpus_on_demand = d_dm.groupby(bid)[other_charges].first().fillna(0).sum()
-    else:
-        corpus_on_demand = 0.0
-
     with r3[0]:
-        st.metric("Total Demand Generated (Without Tax)", f"₹{to_cr(total_demand_generated_without_tax):.2f} Cr")
+        st.metric("Total Demand (Without Tax)", f"₹{to_cr(total_demand_generated_without_tax):.2f} Cr")
     with r3[1]:
         st.metric("Total Tax on Demand", f"₹{to_cr(total_tax_on_demand):.2f} Cr")
     with r3[2]:
-        st.metric("Total Corpus + Maintenance (On Demand)", f"₹{to_cr(corpus_on_demand):.2f} Cr")
-    with r3[3]:
-        st.metric("Total Due", f"₹{to_cr(total_due):.2f} Cr")
+        st.metric("Total Due (With Tax)", f"₹{to_cr(total_due):.2f} Cr")
 
     st.divider()
 
     # ---------------- Row 4 ----------------
     st.markdown("#### Property Collection Metrics")
-    r4 = st.columns(4)
+    r4 = st.columns(3)
     # total collection where demand generated
     total_collection_demand = d.loc[demand_mask, column_map.payment_received_col].fillna(0).sum() if column_map.payment_received_col in d.columns else 0.0
-    # total tax on collections where payment date present and < today
-    pay_mask = d[actual_payment_col].notna() & (d[actual_payment_col] < today) if actual_payment_col in d.columns else pd.Series(False, index=d.index)
-    total_tax_on_collections = d.loc[pay_mask, tax_col].fillna(0).sum() if tax_col in d.columns else 0.0
-    total_collection_without_tax = total_collection_demand - total_tax_on_collections
-    # total collection without tax and corpus (per ideal metrics)
-    total_collection_without_tax_and_corpus = total_collection_without_tax - (total_corpus_maint_bookings or 0.0)
+    # % collected from demand due (guard against divide-by-zero)
+    pct_collected = (total_collection_demand / total_due * 100.0) if total_due else 0.0
+    # total collection without corpus (agreement/corpus from row 2, deduped per booking)
+    total_collection_without_corpus = total_collection_demand - (total_corpus_maint_bookings or 0.0)
 
     with r4[0]:
         st.metric("Total Collection", f"₹{to_cr(total_collection_demand):.2f} Cr")
     with r4[1]:
-        st.metric("Total Tax on Collections", f"₹{to_cr(total_tax_on_collections):.2f} Cr")
+        st.metric("% Collected from Demand Due", f"{pct_collected:.2f}%")
     with r4[2]:
-        st.metric("Total Collection (Without Tax)", f"₹{to_cr(total_collection_without_tax):.2f} Cr")
-    with r4[3]:
-        st.metric("Total Collection (Without Tax & Corpus)", f"₹{to_cr(total_collection_without_tax_and_corpus):.2f} Cr")
+        st.metric("Total Collection (Without Corpus)", f"₹{to_cr(total_collection_without_corpus):.2f} Cr")
 
     st.divider()
 
